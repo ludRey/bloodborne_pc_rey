@@ -5,6 +5,7 @@
 
 #include "bbport_copy.h"
 
+#include <atomic>
 #include <deque>
 #include <boost/container/small_vector.hpp>
 
@@ -112,6 +113,11 @@ public:
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
 
+    /// bbport: device memory made resident behind the sparse arenas (never released).
+    [[nodiscard]] u64 ResidentBytes() const {
+        return resident_bytes.load(std::memory_order_relaxed);
+    }
+
 private:
     struct ArenaBinds {
         const Buffer* arena;
@@ -186,6 +192,7 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    std::atomic<u64> resident_bytes{}; ///< bbport: VRAM report
 
     u32 arena_memory_type_index{};
     u32 block_size{};

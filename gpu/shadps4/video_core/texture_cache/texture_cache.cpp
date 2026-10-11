@@ -874,6 +874,7 @@ void TextureCache::RegisterImage(ImageId image_id) {
     image.flags |= ImageFlagBits::Registered;
     ++registry_generation;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
+    image_memory += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     image.lru_touched_tick = gc_tick;
     ForEachPage(image.info.guest_address, image.info.guest_size,
@@ -888,6 +889,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     ++registry_generation;
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
+    image_memory -= Common::AlignUp(image.info.guest_size, 1024);
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
         const auto page_it = page_table.find(page);
         if (page_it == nullptr) {
@@ -1054,17 +1056,29 @@ void TextureCache::GarbageCollectImages() {
         if (num_deletions == 0) {
             return true;
         }
-        --num_deletions;
         auto& image = slot_images[image_id];
         const bool download = image.SafeToDownload();
         const bool tiled = image.info.IsTiled();
+        // bbport: an image that cannot be evicted now neither uses up the deletions of this
+        // pass nor stays at the head of the queue. Before, the oldest images were GPU-written
+        // tiled ones (render targets of areas left behind): every pass spent its 20-40
+        // deletions on them and evicted nothing, while usage grew past the critical mark.
+        // Moving them to the recent end lets the pass reach older evictable images; they are
+        // looked at again once they are old enough.
+        const auto skip = [&](u64& counter) {
+            ++counter;
+            // Only the queue position: lru_touched_tick also gates UpdateImage's fast path.
+            lru_cache.Touch(image.lru_id, gc_tick);
+            return false;
+        };
         if (tiled && download) {
             // This is a workaround for now. We can't handle non-linear image downloads.
-            return false;
+            return skip(gc_skips_tiled);
         }
         if (download && !pressured) {
-            return false;
+            return skip(gc_skips_unpressured);
         }
+        --num_deletions;
         if (download) {
             // bbport: synchronously, while the image still protects its pages. A deferred
             // write-back landed after FreeImage had unprotected them, over whatever the game
@@ -1107,8 +1121,54 @@ void TextureCache::GarbageCollectImages() {
                         (unsigned long long)(pressure_gc_memory >> 20),
                         (unsigned long long)(critical_gc_memory >> 20),
                         (unsigned long long)gc_evictions, (unsigned long long)gc_downloads);
+            // bbport: where the memory is. The usage above is the driver's figure for the whole
+            // process (buffers included), the image sizes are guest sizes (an estimate).
+            struct Bucket {
+                u64 count = 0, bytes = 0;
+            };
+            Bucket all, old_free, old_tiled_gpu, old_linear_gpu;
+            const u64 old_tick = gc_tick > 80 ? gc_tick - 80 : 0;
+            lru_cache.ForEachItemBelow(gc_tick, [&](ImageId id) {
+                const Image& image = slot_images[id];
+                const u64 bytes = Common::AlignUp(image.info.guest_size, 1024);
+                const auto add = [bytes](Bucket& b) {
+                    ++b.count;
+                    b.bytes += bytes;
+                };
+                add(all);
+                if (image.lru_touched_tick > old_tick && image.lru_touched_tick != ~0ULL) {
+                    return;
+                }
+                if (!image.SafeToDownload()) {
+                    add(old_free);
+                } else if (image.info.IsTiled()) {
+                    add(old_tiled_gpu);
+                } else {
+                    add(old_linear_gpu);
+                }
+            });
+            const u64 budget =
+                instance.CanReportMemoryUsage() ? instance.GetDeviceMemoryBudgetNow() : 0;
+            std::printf("Texture cache: VRAM budget %llu MiB; buffers resident %llu MiB; "
+                        "%llu images %llu MiB (counted %llu MiB); unused for 80+ ticks: "
+                        "%llu evictable %llu MiB, %llu GPU-written tiled %llu MiB, "
+                        "%llu GPU-written linear %llu MiB; skipped: %llu tiled, "
+                        "%llu unpressured\n",
+                        (unsigned long long)(budget >> 20),
+                        (unsigned long long)(buffer_cache.ResidentBytes() >> 20),
+                        (unsigned long long)all.count, (unsigned long long)(all.bytes >> 20),
+                        (unsigned long long)(image_memory >> 20),
+                        (unsigned long long)old_free.count,
+                        (unsigned long long)(old_free.bytes >> 20),
+                        (unsigned long long)old_tiled_gpu.count,
+                        (unsigned long long)(old_tiled_gpu.bytes >> 20),
+                        (unsigned long long)old_linear_gpu.count,
+                        (unsigned long long)(old_linear_gpu.bytes >> 20),
+                        (unsigned long long)gc_skips_tiled,
+                        (unsigned long long)gc_skips_unpressured);
             gc_report_time = now;
             gc_evictions = gc_downloads = 0;
+            gc_skips_tiled = gc_skips_unpressured = 0;
         }
     }
 }
