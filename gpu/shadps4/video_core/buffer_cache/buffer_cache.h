@@ -6,10 +6,13 @@
 #include "bbport_copy.h"
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <boost/container/small_vector.hpp>
+#include <tsl/robin_map.h>
 
 #include "common/interval_set.h"
+#include "common/lru_cache.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/fault_manager.h"
@@ -113,10 +116,15 @@ public:
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
 
-    /// bbport: device memory made resident behind the sparse arenas (never released).
+    /// bbport: device memory made resident behind the sparse arenas.
     [[nodiscard]] u64 ResidentBytes() const {
         return resident_bytes.load(std::memory_order_relaxed);
     }
+
+    /// bbport: under memory pressure, releases the device memory of arena chunks unused for a
+    /// while (BB_BUFFER_EVICT=0 turns it off). Call where no draw is being prepared, right
+    /// before a submission (the unbinds go out with it).
+    void RunGarbageCollector();
 
 private:
     struct ArenaBinds {
@@ -135,6 +143,17 @@ private:
     const Buffer* GetArena(u64 first_block, u64 last_block);
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
+
+    /// bbport: residency is allocated and released per chunk of CHUNK_SHIFT bits.
+    static constexpr u32 CHUNK_SHIFT = 21;
+    struct ResidentChunk {
+        u64 last_frame{};
+        u64 last_tick{};
+        size_t lru_id{};
+        boost::container::small_vector<std::pair<vk::DeviceMemory, u64>, 2> allocations;
+    };
+    void TouchChunks(VAddr device_addr, u64 size);
+    u64 EvictChunk(u64 chunk, ResidentChunk& entry);
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
@@ -193,6 +212,13 @@ private:
     };
     IntervalList<Backing> resident_ranges;
     std::atomic<u64> resident_bytes{}; ///< bbport: VRAM report
+    // bbport: buffer garbage collector state.
+    tsl::robin_map<u64, ResidentChunk> resident_chunks;
+    Common::LeastRecentlyUsedCache<u64, u64> chunk_lru;
+    u32 chunk_shift{CHUNK_SHIFT};
+    u64 gc_last_frame{};
+    u64 gc_evicted_bytes{}, gc_evicted_chunks{}, gc_kept_gpu_bytes{};
+    std::chrono::steady_clock::time_point gc_report_time{};
 
     u32 arena_memory_type_index{};
     u32 block_size{};

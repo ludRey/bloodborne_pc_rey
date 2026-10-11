@@ -1406,6 +1406,8 @@ void Rasterizer::OnSubmit() {
         buffer_cache.ProcessFaultBuffer();
     }
     texture_cache.ProcessDownloadImages();
+    // bbport: before the texture collector, which measures the same memory usage.
+    buffer_cache.RunGarbageCollector();
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
 }
