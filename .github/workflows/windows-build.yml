@@ -37,16 +37,19 @@ jobs:
             mingw-w64-clang-x86_64-nlohmann-json
 
       - name: Build
-        # FSR 3 (fsr-vulkan) uses MSVC's _countof, which the current MSYS2 headers lack.
+        # FSR 3 (fsr-vulkan) uses _countof and swprintf_s without including stdlib.h/wchar.h;
+        # older libc++ headers pulled them in, the current MSYS2 ones do not.
         env:
-          CXXFLAGS: -D_countof(a)=(sizeof(a)/sizeof((a)[0]))
+          CXXFLAGS: -include stdlib.h -include wchar.h
         run: |
           if ! bash build.sh > build-all.log 2>&1; then
+            # Keep going past the first failure so that one run reports every error.
+            ninja -C out/gpu -k 0 bb-probe > keep-going.log 2>&1 || true
             # Job logs need a login; annotations do not: put the errors in one.
             {
-              tail -40 build-all.log
+              tail -15 build-all.log
               echo '--- compiler errors ---'
-              grep -E -A3 'error:|FAILED:|undefined (reference|symbol)' out/gpu-build.log 2>/dev/null | head -150
+              grep -E -B1 -A3 'error:|undefined (reference|symbol)' keep-going.log | head -200
             } > errors.txt
             cat errors.txt
             msg=$(tr -d '\r' < errors.txt | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
