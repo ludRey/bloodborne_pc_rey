@@ -37,6 +37,9 @@ jobs:
             mingw-w64-clang-x86_64-nlohmann-json
 
       - name: Build
+        # FSR 3 (fsr-vulkan) uses MSVC's _countof, which the current MSYS2 headers lack.
+        env:
+          CXXFLAGS: -D_countof(a)=(sizeof(a)/sizeof((a)[0]))
         run: |
           if ! bash build.sh > build-all.log 2>&1; then
             # Job logs need a login; annotations do not: put the errors in one.
