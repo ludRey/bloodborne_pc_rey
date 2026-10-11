@@ -38,7 +38,18 @@ jobs:
 
       - name: Build
         run: |
-          bash build.sh || { tail -80 out/gpu-build.log; exit 1; }
+          if ! bash build.sh > build-all.log 2>&1; then
+            # Job logs need a login; annotations do not: put the errors in one.
+            {
+              tail -40 build-all.log
+              echo '--- compiler errors ---'
+              grep -E -A3 'error:|FAILED:|undefined (reference|symbol)' out/gpu-build.log 2>/dev/null | head -150
+            } > errors.txt
+            cat errors.txt
+            msg=$(tr -d '\r' < errors.txt | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Build failed::$msg"
+            exit 1
+          fi
 
       - name: Collect bb-probe.exe and the DLLs not already installed
         run: |
