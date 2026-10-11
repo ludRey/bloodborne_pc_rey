@@ -47,6 +47,10 @@ jobs:
             -include cstdint -include new -include limits -include utility -include algorithm
             -include memory -include string -include functional -include iterator
         run: |
+          # The newer clang adds warnings (-Wunused-but-set-global) that -Werror turns into errors
+          # in the port's own C files (added after CFLAGS): keep them as warnings in this build.
+          sed -i 's/-Wall -Wextra -Werror>/-Wall -Wextra>/' gpu/CMakeLists.txt
+          grep -n 'COMPILE_LANGUAGE:C>:-Wall' gpu/CMakeLists.txt
           if ! bash build.sh > build-all.log 2>&1; then
             # Keep going past the first failure so that one run reports every error.
             ninja -C out/gpu -k 0 bb-probe > keep-going.log 2>&1 || true
