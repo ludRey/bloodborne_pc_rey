@@ -37,10 +37,15 @@ jobs:
             mingw-w64-clang-x86_64-nlohmann-json
 
       - name: Build
-        # FSR 3 (fsr-vulkan) uses _countof and swprintf_s without including stdlib.h/wchar.h;
-        # older libc++ headers pulled them in, the current MSYS2 ones do not.
+        # The current MSYS2 libc++ no longer includes <new>, <cmath>, <cstdlib>... transitively;
+        # fsr-vulkan, sirit and others relied on that (and on stdlib.h/wchar.h for _countof and
+        # swprintf_s). Force the common headers instead of patching every third-party file.
         env:
-          CXXFLAGS: -include stdlib.h -include wchar.h
+          CXXFLAGS: >-
+            -include stdlib.h -include wchar.h
+            -include cstdlib -include cstdio -include cstring -include cwchar -include cmath
+            -include cstdint -include new -include limits -include utility -include algorithm
+            -include memory -include string -include functional -include iterator
         run: |
           if ! bash build.sh > build-all.log 2>&1; then
             # Keep going past the first failure so that one run reports every error.
